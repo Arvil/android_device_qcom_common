@@ -41,7 +41,8 @@
 #include <unistd.h>
 
 #define QCDT_MAGIC     "QCDT"  /* Master DTB magic */
-#define QCDT_VERSION   2       /* QCDT version */
+#define QCDT_VERSION   1       /* QCDT version */
+#define QCDT_VERSION_NEW   2       /* QCDT version */
 
 #define QCDT_DT_TAG    "qcom,msm-id = <"
 #define QCDT_BOARD_TAG "qcom,board-id = <"
@@ -92,19 +93,23 @@ struct chipSt_t {
 char *input_dir;
 char *output_file;
 char *dtc_path;
+char *dt_tag = QCDT_DT_TAG;
 int   verbose;
 int   page_size = PAGE_SIZE_DEF;
+int   force_v2;
 
 
 void print_help()
 {
-    log_info("dtbTool version %d\n", QCDT_VERSION);
+    log_info("dtbTool version %d (kinda :) )\n", QCDT_VERSION);
     log_info("dtbTool [options] -o <output file> <input DTB path>\n");
     log_info("  options:\n");
     log_info("  --output-file/-o     output file\n");
     log_info("  --dtc-path/-p        path to dtc\n");
     log_info("  --page-size/-s       page size in bytes\n");
+    log_info("  --dt-tag/-d          alternate QCDT_DT_TAG\n");
     log_info("  --verbose/-v         verbose\n");
+    log_info("  --force-v2/-2        use dtb v2 format\n");
     log_info("  --help/-h            this help screen\n");
 }
 
@@ -116,12 +121,14 @@ int parse_commandline(int argc, char *const argv[])
         {"output-file", 1, 0, 'o'},
         {"dtc-path",    1, 0, 'p'},
         {"page-size",   1, 0, 's'},
+        {"dt-tag",      1, 0, 'd'},
         {"verbose",     0, 0, 'v'},
         {"help",        0, 0, 'h'},
+        {"force-v2",    0, 0, '2'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "-o:p:s:vh", long_options, NULL))
+    while ((c = getopt_long(argc, argv, "-o:p:s:d:vh2", long_options, NULL))
            != -1) {
         switch (c) {
         case 1:
@@ -141,8 +148,14 @@ int parse_commandline(int argc, char *const argv[])
                 return RC_ERROR;
             }
             break;
+        case 'd':
+            dt_tag = optarg;
+            break;
         case 'v':
             verbose = 1;
+            break;
+        case '2':
+            force_v2 = 1;
             break;
         case 'h':
         default:
@@ -289,8 +302,8 @@ struct chipInfo_t *getChipInfo(const char *filename, int *num, uint32_t msmversi
         /* Find "qcom,msm-id" */
         while ((llen = getline(&line, &line_size, pfile)) != -1) {
             if (msmversion == 1) {
-                if ((pos = strstr(line, QCDT_DT_TAG)) != NULL) {
-                    pos += strlen(QCDT_DT_TAG);
+                if ((pos = strstr(line, dt_tag)) != NULL) {
+                    pos += strlen(dt_tag);
 
                     entryEnded = 0;
                     while (1) {
@@ -344,12 +357,12 @@ struct chipInfo_t *getChipInfo(const char *filename, int *num, uint32_t msmversi
                         }
                     }
 
-                    log_err("... skip, incorrect '%s' format\n", QCDT_DT_TAG);
+                    log_err("... skip, incorrect '%s' format\n", dt_tag);
                     break;
                 }
             } else if (msmversion == 2) {
-                if ((pos = strstr(line, QCDT_DT_TAG)) != NULL) {
-                    pos += strlen(QCDT_DT_TAG);
+                if ((pos = strstr(line, dt_tag)) != NULL) {
+                    pos += strlen(dt_tag);
 
                     entryEndedDT = 0;
                     for (;entryEndedDT < 1;) {
@@ -444,8 +457,10 @@ struct chipInfo_t *getChipInfo(const char *filename, int *num, uint32_t msmversi
     if (line)
         free(line);
 
+    if (force_v2 || msmversion == 2) {
+
     if (count1 == 0) {
-        log_err("... skip, incorrect '%s' format\n", QCDT_DT_TAG);
+        log_err("... skip, incorrect '%s' format\n", dt_tag);
         return NULL;
     }
     if (count2 == 0) {
@@ -493,6 +508,10 @@ struct chipInfo_t *getChipInfo(const char *filename, int *num, uint32_t msmversi
         free(chipSt);
         free(chipId);
         return chip;
+    }
+
+    } else {
+        pclose(pfile);
     }
 
     return NULL;
@@ -616,83 +635,88 @@ int main(int argc, char **argv)
        extract "qcom,msm-id" parameter
      */
     while ((dp = readdir(dir)) != NULL) {
-        if ((dp->d_type == DT_REG)) {
-            flen = strlen(dp->d_name);
-            if ((flen > 4) &&
-                (strncmp(&dp->d_name[flen-4], ".dtb", 4) == 0)) {
-                log_info("Found file: %s ... ", dp->d_name);
 
-                flen = strlen(input_dir) + strlen(dp->d_name) + 1;
-                filename = (char *)malloc(flen);
-                if (!filename) {
-                    log_err("Out of memory\n");
-                    rc = RC_ERROR;
-                    break;
-                }
-                strncpy(filename, input_dir, flen);
-                strncat(filename, dp->d_name, flen);
+        flen = strlen(input_dir) + strlen(dp->d_name) + 1;
+        filename = (char *)malloc(flen);
+        if (!filename) {
+            log_err("Out of memory\n");
+            rc = RC_ERROR;
+            break;
+        }
+        strncpy(filename, input_dir, flen);
+        strncat(filename, dp->d_name, flen);
 
-                /* To identify the version number */
-                msmversion = GetVersionInfo(filename);
+        if (stat(filename, &st) != 0 || !S_ISREG(st.st_mode)) {
+            free(filename);
+            continue;
+        }
 
-                num = 1;
-                chip = getChipInfo(filename, &num, msmversion);
+        flen = strlen(dp->d_name);
+        if ((flen <= 4) || (strncmp(&dp->d_name[flen-4], ".dtb", 4) != 0)) {
+            free(filename);
+            continue;
+        }
 
-                if (msmversion == 1) {
-                    if (!chip) {
-                        log_err("skip, failed to scan for '%s' tag\n",
-                                QCDT_DT_TAG);
-                        free(filename);
-                        continue;
-                    }
-                }
-                if (msmversion == 2) {
-                    if (!chip) {
-                        log_err("skip, failed to scan for '%s' or '%s' tag\n",
-                                QCDT_DT_TAG, QCDT_BOARD_TAG);
-                        free(filename);
-                        continue;
-                    }
-                }
+        log_info("Found file: %s ... ", dp->d_name);
 
-                if ((stat(filename, &st) != 0) ||
-                    (st.st_size == 0)) {
-                    log_err("skip, failed to get DTB size\n");
-                    free(filename);
-                    continue;
-                }
+        /* To identify the version number */
+        msmversion = force_v2 ? GetVersionInfo(filename) : 1;
 
-                log_info("chipset: %u, rev: %u, platform: %u, subtype: %u\n",
-                         chip->chipset, chip->revNum, chip->platform, chip->subtype);
+        num = 1;
+        chip = getChipInfo(filename, &num, msmversion);
 
-                for (t_chip = chip->t_next; t_chip; t_chip = t_chip->t_next) {
-                    log_info("   additional chipset: %u, rev: %u, platform: %u, subtype: %u\n",
-                             t_chip->chipset, t_chip->revNum, t_chip->platform, t_chip->subtype);
-                }
-
-                rc = chip_add(chip);
-                if (rc != RC_SUCCESS) {
-                    log_err("... duplicate info, skipped\n");
-                    free(filename);
-                    continue;
-                }
-
-                dtb_count++;
-
-                chip->dtb_size = st.st_size +
-                                   (page_size - (st.st_size % page_size));
-                chip->dtb_file = filename;
-
-                for (t_chip = chip->t_next; t_chip; t_chip = t_chip->t_next) {
-                    rc = chip_add(t_chip);
-                    if (rc != RC_SUCCESS) {
-                        log_err("... duplicate info, skipped (chipset %u, rev: %u, platform: %u, subtype %u:\n",
-                             t_chip->chipset, t_chip->revNum, t_chip->platform, t_chip->subtype);
-                        continue;
-                    }
-                    dtb_count++;
-                }
+        if (msmversion == 1) {
+            if (!chip) {
+                log_err("skip, failed to scan for '%s' tag\n",
+                        dt_tag);
+                free(filename);
+                continue;
             }
+        }
+        if (msmversion == 2) {
+            if (!chip) {
+                log_err("skip, failed to scan for '%s' or '%s' tag\n",
+                        dt_tag, QCDT_BOARD_TAG);
+                free(filename);
+                continue;
+            }
+        }
+
+        if (st.st_size == 0) {
+            log_err("skip, failed to get DTB size\n");
+            free(filename);
+            continue;
+        }
+
+        log_info("chipset: %u, rev: %u, platform: %u, subtype: %u\n",
+                 chip->chipset, chip->revNum, chip->platform, chip->subtype);
+
+        for (t_chip = chip->t_next; t_chip; t_chip = t_chip->t_next) {
+            log_info("   additional chipset: %u, rev: %u, platform: %u, subtype: %u\n",
+                     t_chip->chipset, t_chip->revNum, t_chip->platform, t_chip->subtype);
+        }
+
+        rc = chip_add(chip);
+        if (rc != RC_SUCCESS) {
+            log_err("... duplicate info, skipped\n");
+            free(filename);
+            continue;
+        }
+
+        dtb_count++;
+
+        chip->dtb_size = st.st_size +
+                           (page_size - (st.st_size % page_size));
+        chip->dtb_file = filename;
+
+        for (t_chip = chip->t_next; t_chip; t_chip = t_chip->t_next) {
+            rc = chip_add(t_chip);
+            if (rc != RC_SUCCESS) {
+                log_err("... duplicate info, skipped (chipset %u, rev: %u, platform: %u, subtype %u:\n",
+                     t_chip->chipset, t_chip->revNum, t_chip->platform, t_chip->subtype);
+                continue;
+            }
+            dtb_count++;
         }
     }
     closedir(dir);
@@ -717,6 +741,10 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
+    if (force_v2) {
+        version = QCDT_VERSION_NEW;
+    }
+
     /* Write header info */
     wrote += write(out_fd, QCDT_MAGIC, sizeof(uint8_t) * 4); /* magic */
     wrote += write(out_fd, &version, sizeof(uint32_t));      /* version */
@@ -725,7 +753,7 @@ int main(int argc, char **argv)
 
     /* Calculate offset of first DTB block */
     dtb_offset = 12               + /* header */
-                 (24 * dtb_count) + /* DTB table entries */
+                 ((force_v2 ? 24 : 20) * dtb_count) + /* DTB table entries */
                  4;                 /* end of table indicator */
     /* Round up to page size */
     padding = page_size - (dtb_offset % page_size);
@@ -743,7 +771,8 @@ int main(int argc, char **argv)
     for (chip = chip_list; chip; chip = chip->next) {
         wrote += write(out_fd, &chip->chipset, sizeof(uint32_t));
         wrote += write(out_fd, &chip->platform, sizeof(uint32_t));
-        wrote += write(out_fd, &chip->subtype, sizeof(uint32_t));
+        if (force_v2)
+            wrote += write(out_fd, &chip->subtype, sizeof(uint32_t));
         wrote += write(out_fd, &chip->revNum, sizeof(uint32_t));
         if (chip->master->master_offset != 0) {
             wrote += write(out_fd, &chip->master->master_offset, sizeof(uint32_t));
@@ -798,11 +827,11 @@ int main(int argc, char **argv)
     close(out_fd);
 
     if (expected != wrote) {
-        log_err("error writing output file, please rerun: size mismatch %d vs %d\n",
+        log_err("error writing output file, please rerun: size mismatch %zu vs %zu\n",
                 expected, wrote);
         rc = RC_ERROR;
     } else
-        log_dbg("Total wrote %u bytes\n", wrote);
+        log_dbg("Total wrote %zu bytes\n", wrote);
 
     if (rc != RC_SUCCESS)
         unlink(output_file);
